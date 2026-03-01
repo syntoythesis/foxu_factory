@@ -8,7 +8,7 @@ import argparse
 import sys
 import time
 import requests
-import subprocess
+import yaml
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -30,23 +30,27 @@ OPENAI_URL = "https://chat.openai.com"  # TODO: Update with actual URL
 SELECTORS = {
     "prompt_input": "#prompt-textarea > p",  # TODO: Update selector
     "submit_button": "#composer-submit-button",  # TODO: Update selector
+    "generating_image": "//span[contains(text(), 'Creating image')]",  # TODO: Update selector
     "generated_image": "//img[@alt='Generated image']",  # TODO: Update selector
     "login_button": "#conversation-header-actions > div > div > button.btn.relative.group-focus-within\/dialog\:focus-visible\:\[outline-width\:1\.5px\].group-focus-within\/dialog\:focus-visible\:\[outline-offset\:2\.5px\].group-focus-within\/dialog\:focus-visible\:\[outline-style\:solid\].group-focus-within\/dialog\:focus-visible\:\[outline-color\:var\(--text-primary\)\].btn-primary",  # TODO: Update selector
     "email_input": "//input[@name='email' and @type='email']",  # TODO: Update selector
     "continue_button": "(//div[contains(@class, 'flex items-center justify-center') and contains(text(), 'Continue')])[last()]",
+    "email_code_option_link": "//a[contains(text(), 'email') or contains(text(), 'Email') or contains(@href, 'email')]",  # Link to switch to email code verification
     "email_code_input": "//input[@type='text' and @name='code']",  # TODO: Update selector
     "email_code_submit": "//button[@type='submit' and @name='intent' and contains(text(), 'Continue')]",  # TODO: Update selector
 }
 
 # Wait times (in seconds)
-WAIT_TIMEOUT = 300  
+WAIT_TIMEOUT = 600  
 POLL_INTERVAL = 10
 
 # BASE KIRSCHE DESCRIPTION
 KIRSCHE_DESCRIPTION = """
+Use this reference image: https://s3.us-east-1.amazonaws.com/cftest.mothersect.info/refs/kirsche_verstahl_sheet_01.jpg
+
 Kirsche is an anime fox girl with human facial features, including a small nose, large expressive eyes, and a friendly smile. She has fox ears on the top of her head that are covered in white fur that matches the fur on her tail and her hair. Her hair is long, white, and flowing. She has cherry earrings and cherry barrets. She has an electric blue halo over one ear.
 
-Kirsche has caucasian skin. Brown eyes. Human nose. She is cute and warm and playful. Kirsche DOES NOT have human ears. NEVER put human ears on her face. ONLY FOX EARS with white fur that matches her hair and tail.
+Kirsche has caucasian skin. Brown eyes. Human nose. She is cute and warm and playful. Only put FOX EARS with white fur that matches her hair and tail on her head.
 
 Kirsche is tall and curvy, with a slender waist and wide hips. She has a large, fluffy tail that is covered in white fur. Kirsche has an hourglass figure, with a large bust and a small waist. She has long legs and a toned physique.
 
@@ -59,9 +63,10 @@ def setup_driver():
     options = webdriver.ChromeOptions()
     # Keep browser open for manual authentication
     options.add_experimental_option("detach", True)
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
     # Run headless - uncomment to enable
     # options.add_argument("--headless")
-    # options.add_argument("--disable-gpu")  # Required on Windows
+    options.add_argument("--disable-gpu")  # Required on Windows
     # options.add_argument("--no-sandbox")  # Recommended for headless
     # options.add_argument("--disable-dev-shm-usage")  # Overcome limited resource problems
     
@@ -100,14 +105,24 @@ def automated_login(driver, username, password):
         return False
     continue_button.click()
     time.sleep(10)
+    
+    # Check for email code option link (in case password field is shown first)
+    print("Checking for email code option...")
+    email_code_link = find_element_safe(driver, SELECTORS["email_code_option_link"], by=By.XPATH, timeout=5)
+    if email_code_link:
+        print("Found email code option link, clicking it...")
+        email_code_link.click()
+        time.sleep(5)
+    else:
+        print("No email code option link found, assuming code field is already displayed.")
 
     email_code_from_gmail = get_chatgpt_verification_code(username, password)
     if not email_code_from_gmail:
         print("Failed to retrieve verification code from Gmail.")
         return False
     
-    # Enter password
-    print("Entering password...")
+    # Enter email code
+    print("Entering email code...")
     password_input = find_element_safe(driver, SELECTORS["email_code_input"], by=By.XPATH)
     if not password_input:
         return False
@@ -170,6 +185,16 @@ def submit_prompt(driver, prompt_text):
     if not prompt_input:
         return False
     
+    # Refresh page to ensure clean state
+    print("Refreshing page to ensure clean state...")
+    driver.refresh()
+    time.sleep(10)
+    
+    # Re-find prompt input after refresh
+    prompt_input = find_element_safe(driver, SELECTORS["prompt_input"])
+    if not prompt_input:
+        return False
+    
     # Click to focus the input element
     print("Focusing prompt input...")
     prompt_input.click()
@@ -178,17 +203,13 @@ def submit_prompt(driver, prompt_text):
     # Enter prompt text
     print("Entering prompt...")
     full_prompt = KIRSCHE_DESCRIPTION.format(prompt_text).replace("\n\n", " - ")
+    # full_prompt = prompt_text
     prompt_input.send_keys(full_prompt)
     time.sleep(10)
     
     # Submit (try button first, then Enter key as fallback)
     print("Submitting...")
-    submit_button = find_element_safe(driver, SELECTORS["submit_button"], timeout=10)
-    if submit_button:
-        submit_button.click()
-    else:
-        print("Submit button not found, trying Enter key...")
-        prompt_input.send_keys(Keys.RETURN)
+    prompt_input.send_keys(Keys.RETURN)
     
     return True
 
@@ -197,24 +218,35 @@ def wait_for_image_generation(driver, timeout=WAIT_TIMEOUT):
     """Wait for image generation to complete."""
     print("Waiting for image generation...")
     start_time = time.time()
+    counter_until_refresh = 0
     
-    # TODO: Implement proper completion detection
-    # For now, we'll use a simple polling approach
+    # First, wait for generation to start and complete
     while time.time() - start_time < timeout:
+        # Check for "Creating image" indicator first
+        image_wait = driver.find_elements(By.XPATH, SELECTORS["generating_image"])
+        if image_wait:
+            print("\nStill generating image...", end="", flush=True)
+            # If we're still within the timeout window, refresh in case the UI sticks.
+            counter_until_refresh += 1
+            if counter_until_refresh > 7:
+                counter_until_refresh = 0
+                driver.refresh()
+            time.sleep(30)  # Wait longer if we see the "Creating image" indicator
+            continue
         
-        # Check if image element exists
+        # After generation indicator disappears, check for generated image
         try:
             image = driver.find_element(By.XPATH, SELECTORS["generated_image"])
             if image and image.get_attribute("src"):
-                print("Image detected!")
-                time.sleep(2)  # Extra wait to ensure image is fully loaded
+                print("\nImage detected!")
+                time.sleep(30)  # Extra wait to ensure image is fully loaded
                 print("Generation complete!")
                 print(f"Image URL: {image.get_attribute('src')}")
                 return image.get_attribute("src")
         except:
-            print(".", end="", flush=True)
             pass
         
+        # If no indicator and no image yet, wait before next poll
         time.sleep(POLL_INTERVAL)
         print(".", end="", flush=True)
     
@@ -287,6 +319,7 @@ def process_prompt(driver, prompt_text, output_filename):
         return False
     
     # Download image
+    time.sleep(30)  # Extra wait before downloading
     return download_image(driver, output_path)
 
 
@@ -344,6 +377,20 @@ def main():
     if (args.username and not args.password) or (args.password and not args.username):
         parser.error("Both --username and --password must be provided together")
     
+    # Read credentials from creds.yaml if not provided via command line
+    if not args.username or not args.password:
+        try:
+            with open("creds.yaml", "r", encoding="utf-8") as f:
+                creds = yaml.safe_load(f)
+                print("Credentials loaded from creds.yaml")
+                print(f"Username: {creds.get('username')}, Password: {'*' * len(creds.get('password', ''))}")
+                args.username = creds.get("username")
+                args.password = creds.get("password")
+        except FileNotFoundError:
+            sys.exit("Error: creds.yaml file not found and no credentials provided via command line.")
+        except Exception as e:
+            sys.exit(f"Error reading creds.yaml: {e}")
+
     # Validate arguments
     if not args.prompt and not args.prompt_file:
         parser.error("Either --prompt or --prompt-file must be provided")
@@ -405,7 +452,7 @@ def main():
         # print("\nKeeping browser open for inspection...")
         # print("Close the browser window manually when done.")
         print("\nExiting script.")
-        time.sleep(10)
+        time.sleep(5)
         driver.quit()
 
 

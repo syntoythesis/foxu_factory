@@ -1,0 +1,14 @@
+# Ignore Python bytecode files
+__pycache__/
+*.pyc
+# Ignore SQLite database files
+data/*.db
+# Ignore environment variable files
+.env
+# Ignore OS files
+.DS_Store
+Thumbs.db
+# Ignore credentials file
+creds.yaml
+# Ignore generated images
+images/
