@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Foxu Factory Image Downloader",
+  "version": "1.0",
+  "description": "Automatically downloads generated images from ChatGPT",
+  "permissions": [
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*",
+        "http://localhost:8787/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

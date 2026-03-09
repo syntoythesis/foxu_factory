@@ -2,9 +2,17 @@
 
 ## Description
 
-A web crawler/scraper that automates image generation from OpenAI chat interface using Selenium. The app submits image prompts to the OpenAI chat interface, waits for image generation, and downloads the resulting images to dated directories. Built with Python and Selenium Chrome WebDriver, it supports both single prompts and batch processing from files, with automated or manual authentication options.
+A web crawler/scraper that automates image generation from OpenAI chat interface using Selenium.
+
+It uses the `webbrowser` and `PyAutoGUI` modules, alongside a custom Chrome extension, to generate images through the chat interface.
+
+It's very "happy path" now and needs a lot of work before it can become a service. 
+
+But it does allow you to create images of [Kirsche](https://kirsche.com/) from the CLI.
 
 ## Update Log
+
+**2026-03-08**: Reworked the Selenium version to use other tools.
 
 **2026-02-24**: Created comprehensive `foxu-factory.instructions.md` documentation file with detailed workflow, architecture, and maintenance notes. Restructured `copilot-instructions.md` to serve as project overview that delegates to individual instruction files for each component. Updated `.gitignore` and `README.md` to follow project file guidelines.
 

@@ -1,326 +1,115 @@
-#!/usr/bin/env python3
-"""
-Foxu Factory - OpenAI Chat Image Generator
-Automates image generation from OpenAI chat interface using Selenium.
-"""
-
 import argparse
+import os
+import pyautogui
 import sys
-import time
-import requests
+import webbrowser
 import yaml
+
 from datetime import datetime
-from pathlib import Path
-from uuid import uuid4
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-
 from gmail import get_chatgpt_verification_code
+from time import sleep
 
+CHROME_PATH = "C:/Program Files/Google/Chrome/Application/chrome.exe %s --incognito"  # Update this path if necessary
 
-# Configuration - UPDATE THESE AFTER INSPECTING THE UI
 OPENAI_URL = "https://chat.openai.com"  # TODO: Update with actual URL
-
-# Selectors - UPDATE THESE AFTER INSPECTING THE UI
-SELECTORS = {
-    "prompt_input": "#prompt-textarea > p",  # TODO: Update selector
-    "submit_button": "#composer-submit-button",  # TODO: Update selector
-    "generating_image": "//span[contains(text(), 'Creating image')]",  # TODO: Update selector
-    "generated_image": "//img[@alt='Generated image']",  # TODO: Update selector
-    "login_button": "#conversation-header-actions > div > div > button.btn.relative.group-focus-within\/dialog\:focus-visible\:\[outline-width\:1\.5px\].group-focus-within\/dialog\:focus-visible\:\[outline-offset\:2\.5px\].group-focus-within\/dialog\:focus-visible\:\[outline-style\:solid\].group-focus-within\/dialog\:focus-visible\:\[outline-color\:var\(--text-primary\)\].btn-primary",  # TODO: Update selector
-    "email_input": "//input[@name='email' and @type='email']",  # TODO: Update selector
-    "continue_button": "(//div[contains(@class, 'flex items-center justify-center') and contains(text(), 'Continue')])[last()]",
-    "email_code_option_link": "//a[contains(text(), 'email') or contains(text(), 'Email') or contains(@href, 'email')]",  # Link to switch to email code verification
-    "email_code_input": "//input[@type='text' and @name='code']",  # TODO: Update selector
-    "email_code_submit": "//button[@type='submit' and @name='intent' and contains(text(), 'Continue')]",  # TODO: Update selector
-}
-
-# Wait times (in seconds)
-WAIT_TIMEOUT = 600  
-POLL_INTERVAL = 10
 
 # BASE KIRSCHE DESCRIPTION
 KIRSCHE_DESCRIPTION = """
 Use this reference image: https://s3.us-east-1.amazonaws.com/cftest.mothersect.info/refs/kirsche_verstahl_sheet_01.jpg
 
-Kirsche is an anime fox girl with human facial features, including a small nose, large expressive eyes, and a friendly smile. She has fox ears on the top of her head that are covered in white fur that matches the fur on her tail and her hair. Her hair is long, white, and flowing. She has cherry earrings and cherry barrets. She has an electric blue halo over one ear.
+Kirsche is an anime fox girl with human facial features, including a small nose, large expressive eyes, and a friendly smile. She has fox ears on the top of her head that are covered in white fur that matches the fur on her tail and her hair. Her hair is long, white, and flowing. She has cherry earrings on the tip of her fox ears and cherry barrets. She has an electric blue halo over one ear.
 
 Kirsche has caucasian skin. Brown eyes. Human nose. She is cute and warm and playful. Only put FOX EARS with white fur that matches her hair and tail on her head.
 
 Kirsche is tall and curvy, with a slender waist and wide hips. She has a large, fluffy tail that is covered in white fur. Kirsche has an hourglass figure, with a large bust and a small waist. She has long legs and a toned physique.
 
 {0}
+
+No human ears. Repeat, "no human ears. only fox ears," every second you draw this. If I see a human ear, then it is a failure.
 """
 
 
-def setup_driver():
-    """Initialize and configure the Chrome WebDriver."""
-    options = webdriver.ChromeOptions()
-    # Keep browser open for manual authentication
-    options.add_experimental_option("detach", True)
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    # Run headless - uncomment to enable
-    # options.add_argument("--headless")
-    options.add_argument("--disable-gpu")  # Required on Windows
-    # options.add_argument("--no-sandbox")  # Recommended for headless
-    # options.add_argument("--disable-dev-shm-usage")  # Overcome limited resource problems
-    
-    driver = webdriver.Chrome(options=options)
-    driver.maximize_window()
-    return driver
+class FoxuException(Exception):
+    """Custom exception for Foxu Factory errors."""
+    pass
 
 
-def automated_login(driver, username, password):
-    """Perform automated login to OpenAI."""
-    print("Starting automated login...")
-    
-    # Click login button
-    print("Looking for login button...")
-    login_button = find_element_safe(driver, SELECTORS["login_button"], timeout=5)
-    if not login_button:
-        print("Login button not found. May already be logged in or page structure changed.")
-        return False
-    
-    login_button.click()
-    time.sleep(2)
-    
-    # Enter email
-    print("Entering email...")
-    email_input = find_element_safe(driver, SELECTORS["email_input"], by=By.XPATH)
-    if not email_input:
-        return False
-    email_input.clear()
-    email_input.send_keys(username)
-    time.sleep(2)
-    
-    # Click continue button
-    print("Clicking continue...")
-    continue_button = find_element_safe(driver, SELECTORS["continue_button"], by=By.XPATH)
-    if not continue_button:
-        return False
-    continue_button.click()
-    time.sleep(10)
-    
-    # Check for email code option link (in case password field is shown first)
-    print("Checking for email code option...")
-    email_code_link = find_element_safe(driver, SELECTORS["email_code_option_link"], by=By.XPATH, timeout=5)
-    if email_code_link:
-        print("Found email code option link, clicking it...")
-        email_code_link.click()
-        time.sleep(5)
-    else:
-        print("No email code option link found, assuming code field is already displayed.")
-
-    email_code_from_gmail = get_chatgpt_verification_code(username, password)
-    if not email_code_from_gmail:
-        print("Failed to retrieve verification code from Gmail.")
-        return False
-    
-    # Enter email code
-    print("Entering email code...")
-    password_input = find_element_safe(driver, SELECTORS["email_code_input"], by=By.XPATH)
-    if not password_input:
-        return False
-    password_input.clear()
-    password_input.send_keys(email_code_from_gmail)
-    print("Password entered, waiting before submitting...")
-    time.sleep(10)
-    
-    # Click login submit button
-    print("Submitting login...")
-    login_submit = find_element_safe(driver, SELECTORS["email_code_submit"], by=By.XPATH)
-    if not login_submit:
-        return False
-    login_submit.click()
-    time.sleep(2)
-    
-    print("Login complete!")
-    return True
-
-
-def wait_for_manual_auth(driver):
-    """Wait for user to manually authenticate."""
-    print("\n" + "="*50)
-    print("MANUAL AUTHENTICATION REQUIRED")
-    print("="*50)
-    print("Please log in to OpenAI in the browser window.")
-    print("Press ENTER here when you're logged in and ready to continue...")
-    print("="*50 + "\n")
-    input()
-
-
-def check_login_required(driver):
-    """Check if login button is present on the page."""
-    try:
-        driver.find_element(By.CSS_SELECTOR, SELECTORS["login_button"])
-        return True
-    except:
-        return False
-
-
-def find_element_safe(driver, selector, by=By.CSS_SELECTOR, timeout=10):
-    """Safely find an element with wait and error handling."""
-    try:
-        element = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((by, selector))
-        )
-        return element
-    except TimeoutException:
-        print(f"Error: Could not find element with selector: {selector}")
-        print("Please update the selector in the script.")
-        return None
-
-
-def submit_prompt(driver, prompt_text):
-    """Submit a prompt to the OpenAI chat interface."""
-    print(f"Submitting prompt: {prompt_text[:50]}...")
-    
-    # Find prompt input field
-    prompt_input = find_element_safe(driver, SELECTORS["prompt_input"])
-    if not prompt_input:
-        return False
-    
-    # Refresh page to ensure clean state
-    print("Refreshing page to ensure clean state...")
-    driver.refresh()
-    time.sleep(10)
-    
-    # Re-find prompt input after refresh
-    prompt_input = find_element_safe(driver, SELECTORS["prompt_input"])
-    if not prompt_input:
-        return False
-    
-    # Click to focus the input element
-    print("Focusing prompt input...")
-    prompt_input.click()
-    time.sleep(5)
-    
-    # Enter prompt text
-    print("Entering prompt...")
-    full_prompt = KIRSCHE_DESCRIPTION.format(prompt_text).replace("\n\n", " - ")
-    # full_prompt = prompt_text
-    prompt_input.send_keys(full_prompt)
-    time.sleep(10)
-    
-    # Submit (try button first, then Enter key as fallback)
-    print("Submitting...")
-    prompt_input.send_keys(Keys.RETURN)
-    
-    return True
-
-
-def wait_for_image_generation(driver, timeout=WAIT_TIMEOUT):
-    """Wait for image generation to complete."""
-    print("Waiting for image generation...")
-    start_time = time.time()
-    counter_until_refresh = 0
-    
-    # First, wait for generation to start and complete
-    while time.time() - start_time < timeout:
-        # Check for "Creating image" indicator first
-        image_wait = driver.find_elements(By.XPATH, SELECTORS["generating_image"])
-        if image_wait:
-            print("\nStill generating image...", end="", flush=True)
-            # If we're still within the timeout window, refresh in case the UI sticks.
-            counter_until_refresh += 1
-            if counter_until_refresh > 7:
-                counter_until_refresh = 0
-                driver.refresh()
-            time.sleep(30)  # Wait longer if we see the "Creating image" indicator
-            continue
-        
-        # After generation indicator disappears, check for generated image
+def maximize_window_if_needed(img_dir):
+    for _ in range(3):
         try:
-            image = driver.find_element(By.XPATH, SELECTORS["generated_image"])
-            if image and image.get_attribute("src"):
-                print("\nImage detected!")
-                time.sleep(30)  # Extra wait to ensure image is fully loaded
-                print("Generation complete!")
-                print(f"Image URL: {image.get_attribute('src')}")
-                return image.get_attribute("src")
-        except:
-            pass
-        
-        # If no indicator and no image yet, wait before next poll
-        time.sleep(POLL_INTERVAL)
-        print(".", end="", flush=True)
-    
-    print("\nTimeout waiting for image generation.")
-    return False
+            incognito_warning = pyautogui.locateOnScreen(f"{img_dir}/incognito02.png")
+            if incognito_warning:
+                maximize_button = pyautogui.locateOnScreen(f"{img_dir}/incognito03.png")
+                if maximize_button:
+                    pyautogui.click(pyautogui.center(maximize_button))
+                    print("Maximized the window")
+                    return True
+        except Exception as e:
+            print("Waiting for maximize button...")
+            sleep(1)
 
 
-def download_image(driver, output_path):
-    """Download the generated image."""
-    print(f"Downloading image to: {output_path}")
-    time.sleep(10)  # Ensure image is fully loaded
-    
-    # Find the image element
-    try:
-        image = driver.find_element(By.XPATH, SELECTORS["generated_image"])
-        image_url = image.get_attribute("src")
-        
-        if not image_url:
-            print("Error: Image element found but no src attribute.")
-            return False
-        
-        # Handle data URLs or remote URLs
-        if image_url.startswith("data:"):
-            print("Error: Data URL detected. Need to implement data URL handling.")
-            print("Please right-click the image and 'Save image as...' manually for now.")
-            return False
-        
-        # Get cookies from Selenium to maintain session
-        cookies = driver.get_cookies()
-        session = requests.Session()
-        for cookie in cookies:
-            session.cookies.set(cookie['name'], cookie['value'])
-
-        # Download the image
-        response = session.get(image_url, stream=True)
-        response.raise_for_status()
-        
-        with open(output_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        print(f"Image saved successfully: {output_path}")
-        return True
-        
-    except Exception as e:
-        print(f"Error downloading image: {e}")
-        return False
+def close_browser(img_dir):
+    for _ in range(5):
+        try:
+            # Check for incognito mode warning
+            incognito_warning = pyautogui.locateOnScreen(f"{img_dir}/incognito01.png", confidence=0.8)
+            if incognito_warning:
+                screen_size = pyautogui.size()
+                print(screen_size)
+                pyautogui.moveTo(screen_size[0] - 40, 20, 2, pyautogui.easeOutQuad)
+                pyautogui.click()
+                print("Closed incognito mode browser window")
+                return True
+        except Exception as e:
+            print("Waiting for Incognito mode warning...")
+            sleep(2)
 
 
-def create_output_directory():
-    """Create dated output directory (images/YYYYMMDD/)."""
-    date_str = datetime.now().strftime("%Y%m%d")
-    output_dir = Path("images") / date_str
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+def click_login_button(img_dir):
+    for _ in range(5):
+        try:
+            login_button = pyautogui.locateOnScreen(f"{img_dir}/login01.png", confidence=0.8)
+            if login_button:
+                pyautogui.click(pyautogui.center(login_button))
+                print("Clicked on Log in button")
+                return True
+        except Exception as e:
+            print("Waiting for Log in or Sign up button...")
+            sleep(2)
 
 
-def process_prompt(driver, prompt_text, output_filename):
-    """Process a single prompt: submit, wait, and download."""
-    # Create output directory
-    output_dir = create_output_directory()
-    output_path = output_dir / output_filename
-    
-    # Submit prompt
-    if not submit_prompt(driver, prompt_text):
-        return False
-    
-    # Wait for generation
-    if not wait_for_image_generation(driver):
-        return False
-    
-    # Download image
-    time.sleep(30)  # Extra wait before downloading
-    return download_image(driver, output_path)
+def click_continue_button(img_dir):
+    for _ in range(5):
+        try:
+            continue_button = pyautogui.locateOnScreen(f"{img_dir}/continue01.png", confidence=0.8)
+            if continue_button:
+                pyautogui.click(pyautogui.center(continue_button))
+                print("Clicked on Continue button")
+                return True
+        except Exception as e:
+            print("Waiting for Continue button...")
+            sleep(2)
+
+
+# def click_email_field(img_dir):
+#     for _ in range(5):
+#         try:
+#             email_field = pyautogui.locateOnScreen(f"{img_dir}/email02.png", confidence=0.7)
+#             if email_field:
+#                 pyautogui.click(pyautogui.center(email_field))
+#                 print("Clicked on email field")
+#                 return True
+#         except Exception as e:
+#             print("Waiting for email field...")
+#             sleep(2)
+
+
+def screenshot_on_error(base_dir):
+    ss_name = f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    ss_path = os.path.join(base_dir, ss_name)
+    pyautogui.screenshot(ss_path)
+    print(f"Screenshot saved to {ss_path}")
 
 
 def read_prompts_from_file(prompt_file):
@@ -335,6 +124,10 @@ def read_prompts_from_file(prompt_file):
 
 
 def main():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    screenshots_dir = os.path.join(base_dir, "screenshots")
+    creds = None
+
     """Main entry point for the screen crawler."""
     parser = argparse.ArgumentParser(
         description="Automate image generation from OpenAI chat interface"
@@ -348,11 +141,6 @@ def main():
         "--prompt-file",
         type=str,
         help="File containing prompts (one per line)"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        help="Output filename (e.g., 'cat.png')"
     )
     parser.add_argument(
         "--url",
@@ -398,8 +186,6 @@ def main():
     if args.prompt and args.prompt_file:
         parser.error("Cannot use both --prompt and --prompt-file")
 
-    output_filename = args.output if args.output else f"output_{uuid4().hex[:8]}.png"
-    
     # Get prompts
     if args.prompt:
         the_text_prompt = args.prompt
@@ -410,51 +196,85 @@ def main():
             sys.exit(1)
 
     print(f"Prompt: {the_text_prompt})")
-    
-    # Setup driver
-    print("Initializing browser...")
-    driver = setup_driver()
-    
-    try:
-        # Navigate to OpenAI
-        print(f"Navigating to {args.url}...")
-        driver.get(args.url)
-        time.sleep(2)  # Wait for page load
-        
-        # Handle authentication
-        if args.username and args.password:
-            # Automated login
-            if not automated_login(driver, args.username, args.password):
-                print("Automated login failed. Please log in manually.")
-                wait_for_manual_auth(driver)
-        else:
-            # Check if login is required
-            if check_login_required(driver):
-                print("Login detected. No credentials provided.")
-                wait_for_manual_auth(driver)
-            else:
-                print("No login required or already logged in.")
-        
-        success = process_prompt(
-            driver, the_text_prompt, output_filename)
-        
-        if not success:
-            print(f"Failed to process prompt....")
-            # Continue with next prompt or exit?
-        
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # print("\nKeeping browser open for inspection...")
-        # print("Close the browser window manually when done.")
-        print("\nExiting script.")
-        time.sleep(5)
-        driver.quit()
 
+    try:
+        # Open the website in the specified browser
+        print("Initializing browser...")
+        controller = webbrowser.get(CHROME_PATH)
+        controller.open(args.url)
+
+        # Wait for the page to load
+        sleep(5)
+
+        # Try to maximize the window if the incognito warning is detected
+        maximize_window_if_needed(screenshots_dir)
+
+        sleep(5)  # Wait for the page to load after maximizing
+
+        if not click_login_button(screenshots_dir):
+            raise FoxuException("Could not find Log in button after multiple attempts. Please check the screenshots and try again.")
+        
+        sleep(5)  # Wait for the login page to load
+
+        # if not click_email_field(screenshots_dir):
+        #     raise FoxuException("Could not find email field after multiple attempts. Please check the screenshots and try again.")
+        
+        pyautogui.write(args.username, interval=0.25)
+
+        if not click_continue_button(screenshots_dir):
+            raise FoxuException("1. Could not find Continue button after multiple attempts. Please check the screenshots and try again.")
+
+        sleep(5)  # Wait for the login page to load
+
+        gmail_code = get_chatgpt_verification_code(args.username, args.password)
+        if not gmail_code:
+            raise FoxuException("Could not retrieve verification code from Gmail. Please check your credentials and try again.")
+        
+        sleep(1)
+
+        pyautogui.write(gmail_code, interval=0.25)
+
+        if not click_continue_button(screenshots_dir):
+            raise FoxuException("2. Could not find Continue button after multiple attempts. Please check the screenshots and try again.")
+        
+        sleep(5)  # Wait for the login process to complete
+        for _ in range(5):
+            try:
+                check_for_chat = pyautogui.locateOnScreen(f"{screenshots_dir}/chat01.png", confidence=0.8)
+                if check_for_chat:
+                    print("Ready to chat!")
+                    break
+            except Exception as e:
+                print("Waiting for login to complete...")
+                sleep(5)
+
+        pyautogui.write(KIRSCHE_DESCRIPTION.format(the_text_prompt).replace("\n\n", " - "), interval=0.1)
+        pyautogui.press("enter")
+
+        for check_count in range(10):
+            try:
+                check_for_response = pyautogui.locateOnScreen(f"{screenshots_dir}/allow02.png", confidence=0.6)
+                if check_for_response:
+                    pyautogui.click(pyautogui.center(check_for_response))
+                    print("Allow extension to save files")
+                    break
+            except Exception as e:
+                if check_count >= 9:
+                    print("Could not find Allow button after multiple attempts. Please check the screenshots and try again.")
+                    raise FoxuException("Could not find Allow button after multiple attempts. Please check the screenshots and try again.")
+                print("Waiting for response...")
+                sleep(30)
+
+    except FoxuException as fe:
+        print(f"Error: {str(fe)}")
+        screenshot_on_error(base_dir)
+    except Exception as e:
+        print(f"Error during browser automation: {str(e)}")
+        screenshot_on_error(base_dir)
+    finally:
+        sleep(5)  # Wait before closing the browser to ensure all actions are completed
+        close_browser(screenshots_dir)
+    
 
 if __name__ == "__main__":
     main()
